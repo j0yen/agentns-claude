@@ -1,17 +1,60 @@
-//! AC9: --no-unshare fallback. Stage-2 scaffold stub; iter-2 lands the real test.
+//! AC9: `--no-unshare` fallback. On a stock kernel, the flag yields exit 0
+//! with a stderr warning; without the flag, the launcher refuses to run
+//! and prints a clear "kernel does not support agent namespaces" message.
 
-#[test]
-#[ignore = "iter-1 scaffold: --no-unshare fallback lands in iter-2"]
-fn no_unshare_exits_zero_with_warning() {
-    // Will assert `agentns-claude --intent test --no-unshare -- true` exits
-    // 0 and stderr contains a warning string ('mock' or 'no-unshare' or
-    // 'stock kernel').
+#![allow(clippy::unwrap_used, clippy::panic)]
+
+use assert_cmd::Command;
+
+fn bin() -> Command {
+    let mut c = Command::cargo_bin("agentns-claude").unwrap();
+    // Suppress mock-mode so the real fallback path runs.
+    c.env_remove("AGENTNS_SESSION_ID_OVERRIDE");
+    c.env_remove("AGENTNS_MOCK_FILE");
+    c
+}
+
+fn on_wintermute_kernel() -> bool {
+    std::path::Path::new("/proc/self/agent_session").exists()
 }
 
 #[test]
-#[ignore = "iter-1 scaffold: --no-unshare fallback lands in iter-2"]
+fn no_unshare_exits_zero_with_warning() {
+    if on_wintermute_kernel() {
+        // On wintermute, the real unshare path runs and the --no-unshare
+        // sentinel test loses its meaning. Skip — AC9 stock-kernel branch
+        // is already in scope; live ACs (5-8) cover wintermute behavior.
+        return;
+    }
+    let out = bin()
+        .args(["--intent", "test", "--no-unshare", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "--no-unshare must exit 0 on stock kernel; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8(out.stderr).unwrap().to_lowercase();
+    assert!(
+        err.contains("no-unshare") || err.contains("stock") || err.contains("synthesized"),
+        "expected stock-kernel warning on stderr: {err}"
+    );
+}
+
+#[test]
 fn missing_no_unshare_exits_nonzero_on_stock_kernel() {
-    // Will assert that without --no-unshare and without the wintermute
-    // kernel, the launcher exits non-zero with a clear 'kernel does not
-    // support agent namespaces' message on stderr.
+    if on_wintermute_kernel() {
+        return;
+    }
+    let out = bin()
+        .args(["--intent", "test", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "stock kernel without --no-unshare must fail");
+    let err = String::from_utf8(out.stderr).unwrap().to_lowercase();
+    assert!(
+        err.contains("kernel does not support agent namespaces"),
+        "expected clear remediation message; got {err}"
+    );
 }
