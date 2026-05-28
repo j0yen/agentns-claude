@@ -1,0 +1,69 @@
+{
+  "schema": "autobuilder.intent_card.v1",
+  "prd_source": "/home/jsy/wintermute/autobuilder/PRD-agentns-claude.md",
+  "intent_slug": "agentns-claude",
+  "root_motivation": "Every Claude session reads /proc/$PID/agent_session but the kernel only populates it inside CLONE_NEWAGENT. No userspace tool wraps `claude` (Claude Code) in that unshare, so downstream tools (mirror, episodic-observer, ctrace) re-derive session identity from PID-tree walks and JSONL filenames, which drop on SessionEnd-hook miss and crash recovery. agentns-claude is the thin launcher that creates the namespace at session birth so every consumer sees the same stable 128-bit id, and so PR_SET_AGENT_BUDGET_LIMITS has a namespace to apply to (runaway-session containment).",
+  "user_persona": "Claude itself (headless via pevent or systemd-user units, and interactive via shell alias), plus self-review automation and any tool that needs to attribute work to a session. Run on jsy's laptop under linux-wintermute when booted; on stock kernels falls back to mock-mode for downstream dev.",
+  "unfakeable_metric": {
+    "name": "tests_pass_count",
+    "lower_is_better": false,
+    "harness_command": "cargo test --release --message-format=json",
+    "target": null
+  },
+  "acceptance_criteria": [
+    { "id": "AC1",  "level": "MUST", "description": "cargo build --release produces target/release/agentns-claude; cargo install --path . puts it in ~/.cargo/bin/; --version prints crate version.", "test": "tests/acceptance_build.rs + smoke: agentns-claude --version" },
+    { "id": "AC2",  "level": "MUST", "description": "--help is honest: lists --intent, --budget, --no-unshare, --verbose, mock-mode contract, --no-unshare fallback.", "test": "tests/acceptance_help.rs" },
+    { "id": "AC3",  "level": "MUST", "description": "Mock mode: AGENTNS_SESSION_ID_OVERRIDE exported to child env; /tmp/agentns-mock file wins over env when both set.", "test": "tests/acceptance_mock.rs" },
+    { "id": "AC4",  "level": "MUST", "description": "Exec semantics: exits with wrapped command's exit code; non-existent command exits non-zero with a clear error.", "test": "tests/acceptance_exec.rs" },
+    { "id": "AC5",  "level": "MUST", "description": "[boot] unshare succeeds under linux-wintermute; consecutive invocations get different ids.", "test": "tests/acceptance_unshare_boot.rs (#[ignore] unless WINTERMUTE_BOOT=1)" },
+    { "id": "AC6",  "level": "MUST", "description": "[boot] inheritance: grandchildren see the same agent_session id.", "test": "tests/acceptance_inheritance_boot.rs (#[ignore] unless WINTERMUTE_BOOT=1)" },
+    { "id": "AC7",  "level": "MUST", "description": "[boot] intent_tag: prctl(PR_SET_AGENT_INTENT_TAG) reflects --intent in /proc/self/agent_intent_tag.", "test": "tests/acceptance_intent_tag_boot.rs (#[ignore] unless WINTERMUTE_BOOT=1)" },
+    { "id": "AC8",  "level": "MUST", "description": "[boot] budget enforcement: --budget wall=2s -- sleep 60 is killed by the kernel at ~2s.", "test": "tests/acceptance_budget_boot.rs (#[ignore] unless WINTERMUTE_BOOT=1)" },
+    { "id": "AC9",  "level": "MUST", "description": "--no-unshare exits 0 on stock kernel with stderr warning; without --no-unshare exits non-zero with a clear 'kernel does not support agent namespaces' message.", "test": "tests/acceptance_no_unshare.rs" },
+    { "id": "AC10", "level": "MUST", "description": "README documents install, usage, mock-mode contract; CHANGELOG has v0.1.0 section.", "test": "tests/acceptance_docs.rs (string-greps README + CHANGELOG)" }
+  ],
+  "scope": [
+    "Argv parsing: --intent (required), --budget, --no-unshare, --verbose, -- <cmd> ...",
+    "unshare(CLONE_NEWAGENT) + prctl(PR_SET_AGENT_INTENT_TAG) + prctl(PR_SET_AGENT_BUDGET_LIMITS) on linux-wintermute",
+    "Synthesize session_id from (uid, boot_time_ns, monotonic_now_ns) under --no-unshare",
+    "Mock mode via $AGENTNS_SESSION_ID_OVERRIDE env and /tmp/agentns-mock file",
+    "exec into the wrapped command; inherit exit code"
+  ],
+  "non_goals": [
+    "Session-manager UI (session-postmortem is PRD #5)",
+    "Custom intent-tag schemas",
+    "Auto-detection of slash commands to set intent",
+    "Network namespace, cgroup, or seccomp shaping"
+  ],
+  "hard_constraints": {
+    "rust_edition": "2024",
+    "target_kind": "cli",
+    "deny_unsafe": false,
+    "max_deps": 5,
+    "msrv": "1.85",
+    "additional": {
+      "binary_size_kb_max": 4096,
+      "exec_latency_ms_target": 1,
+      "deny_async": true
+    }
+  },
+  "five_whys_trace": [
+    { "why": 1, "q": "Why does Claude need a launcher to wrap itself?",
+      "a": "Because /proc/$PID/agent_session is empty unless something called unshare(CLONE_NEWAGENT) up the PID tree, and nothing does today." },
+    { "why": 2, "q": "Why does every downstream tool care about a stable session_id?",
+      "a": "Because mirror/episodic-observer/session-index re-derive session identity from PID-tree walks and JSONL filenames; both methods drop on crash/reboot." },
+    { "why": 3, "q": "Why is a kernel-stamped id more durable than userspace identity?",
+      "a": "Because the kernel populates /proc/$PID/agent_session for every descendant of the unshare even after the userspace hook process dies." },
+    { "why": 4, "q": "Why does this PRD bundle budget enforcement with namespace creation?",
+      "a": "Because PR_SET_AGENT_BUDGET_LIMITS only applies inside an agent namespace; no launcher → no protection against runaway-session blowups." },
+    { "why": 5, "q": "Why is this a foundation PRD rather than part of session-postmortem?",
+      "a": "Because PRDs #4 (recall-session-stamp) and #5 (session-postmortem) both depend on a session having an id from birth; this is the prerequisite." }
+  ],
+  "ambiguities_resolved": [
+    { "question": "Is --intent required or optional with a default?",
+      "resolution": "Required. Optional with default silently drops attribution; PRD §6 leans required." },
+    { "question": "--budget syntax: comma vs JSON?",
+      "resolution": "Comma-separated key=value pairs with --budget-file <path> escape for JSON." }
+  ],
+  "created_at": "2026-05-28T11:55:00Z"
+}
