@@ -10,7 +10,7 @@
 //!   requires kernel_has_agent_ns() == true + prctl EINVAL), so we verify
 //!   only that the AGENTNS_MODE env is emitted by the child.
 
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use assert_cmd::Command;
 

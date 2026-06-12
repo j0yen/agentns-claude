@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.0 — 2026-06-12
+
+### iter-4: assay agentns gate (agentns-session-wire AC5)
+
+- Add `src/assay.rs` module: `is_live()` runs `assay agentns --json`, parses
+  `verdict.type`, and returns `true` only when the verdict is `"Live"`.
+  Mock seam: `AGENTNS_ASSAY_MOCK_VERDICT` injects verdicts in tests.
+- Wire assay gate into `resolve_session()`: when `kernel_has_agent_ns()` is
+  true but `assay::is_live()` is false, skip prctl and go directly to
+  synthesize path with mode `"synth-fallback"` and WARN log.
+- Add `tests/acceptance_assay_gate.rs`: AC5 acceptance tests covering
+  FlagRejected/Inert → synth-fallback, and Live + prctl mock 0 → prctl mode.
+- Update resolution order comment to iter-4 (6-step ladder with assay gate
+  at step 3).
+
 ## v0.3.0 — 2026-06-12
 
 ### iter-3: prctl(PR_SET_AGENT_NS) wiring

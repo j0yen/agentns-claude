@@ -16,6 +16,7 @@
     clippy::option_if_let_else
 )]
 
+pub mod assay;
 pub mod budget;
 pub mod mock;
 pub mod unshare;

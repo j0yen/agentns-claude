@@ -4,7 +4,7 @@
 //! and rejects all-zeros, wrong-length, and non-hex strings.
 //! Uses `AGENTNS_SESSION_PATH` to inject a tmp file without needing a kernel.
 
-#![allow(clippy::unwrap_used, clippy::panic, unsafe_code)]
+#![allow(clippy::unwrap_used, clippy::panic, unsafe_code, clippy::expect_used)]
 
 use std::io::Write;
 use std::path::Path;

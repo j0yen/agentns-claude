@@ -38,7 +38,15 @@ use nix::unistd::getuid;
 // ---------------------------------------------------------------------------
 
 /// `PR_AGENT_BASE = 0x41544E53` ("ATNS"), wintermute UAPI.
-const PR_AGENT_BASE: libc::c_int = 0x41544E53_u32 as libc::c_int;
+// SAFETY: the bit pattern 0x4154_4E53 (ASCII "ATNS") is intentional and
+// well-defined wrapping from the UAPI definition; u32→i32 reinterpret is
+// the standard pattern for prctl constants larger than i32::MAX.
+#[allow(
+    clippy::unreadable_literal,
+    clippy::cast_possible_wrap,
+    clippy::as_conversions
+)]
+const PR_AGENT_BASE: libc::c_int = 0x4154_4E53_u32 as libc::c_int;
 
 /// `PR_SET_AGENT_NS = PR_AGENT_BASE + 7` — create a fresh agent namespace.
 const PR_SET_AGENT_NS: libc::c_int = PR_AGENT_BASE.wrapping_add(7);
@@ -262,6 +270,7 @@ pub fn set_intent(tag: &str) {
     };
 
     // SAFETY: see item-level comment above.
+    #[allow(clippy::as_conversions)] // ptr→usize is the libc::prctl varargs convention
     let _rc = unsafe {
         libc::prctl(
             PR_SET_AGENT_INTENT_TAG,

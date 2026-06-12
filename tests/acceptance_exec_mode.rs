@@ -3,7 +3,7 @@
 //! Extends the AC4 exec test to verify that `AGENTNS_MODE` appears in the
 //! child's environment alongside `AGENTNS_SESSION_ID` and `AGENTNS_INTENT`.
 
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use assert_cmd::Command;
 

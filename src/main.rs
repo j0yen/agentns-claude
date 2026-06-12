@@ -1,13 +1,15 @@
 //! agentns-claude binary entry point.
 //!
-//! Resolution order for the wrapped child's session_id (iter-3):
+//! Resolution order for the wrapped child's session_id (iter-4):
 //!
 //! 1. Mock file at `/tmp/agentns-mock` (or `$AGENTNS_MOCK_FILE` for tests).
 //! 2. `$AGENTNS_SESSION_ID_OVERRIDE` env var.
 //! 3. `--no-unshare`: synthesize from `(uid, btime, monotonic_ns)`.
-//! 4. `prctl(PR_SET_AGENT_NS)` + `read_agent_session` (wintermute kernel).
-//! 5. prctl returned ENOSYS/EINVAL (stock kernel) → synthesize + warn, mode `synth-fallback`.
-//! 6. prctl returned EPERM → fatal.
+//! 4. `assay agentns` gate: if assay reports anything other than `Live`,
+//!    skip to step 6 immediately (no wasted syscall on broken kernels).
+//! 5. `prctl(PR_SET_AGENT_NS)` + `read_agent_session` (wintermute kernel).
+//! 6. prctl returned ENOSYS/EINVAL (stock kernel) → synthesize + warn, mode `synth-fallback`.
+//! 7. prctl returned EPERM → fatal.
 //!
 //! `AGENTNS_MODE` is exported to the child alongside `AGENTNS_SESSION_ID`
 //! and `AGENTNS_INTENT`.
@@ -18,7 +20,7 @@ use std::process::{Command, ExitCode};
 
 use clap::Parser;
 
-use agentns_claude::{budget, mock, unshare};
+use agentns_claude::{assay, budget, mock, unshare};
 
 /// Wrap a command in a wintermute agent namespace.
 #[derive(Debug, Parser)]
@@ -127,16 +129,18 @@ fn run(cli: &Cli) -> Result<ExitCode, LauncherError> {
     Ok(exec_child(cli, &session_id, mode))
 }
 
-/// Resolve (session_id, mode) according to the iter-3 precedence ladder.
+/// Resolve (session_id, mode) according to the iter-4 precedence ladder.
 ///
 /// Precedence:
 /// 1. mock (mock file or `AGENTNS_SESSION_ID_OVERRIDE`)
 /// 2. `--no-unshare` → synthesize, mode `"no-unshare"`
-/// 3. kernel has prctl → `create_agent_ns()` + `set_intent()` + `read_agent_session()`
+/// 3. assay gate: if `assay agentns` reports anything other than `Live`,
+///    skip the prctl attempt entirely → synthesize + warn, mode `"synth-fallback"`
+/// 4. kernel has prctl → `create_agent_ns()` + `set_intent()` + `read_agent_session()`
 ///    → mode `"prctl"`
-/// 4. prctl returned ENOSYS/EINVAL → synthesize + warn, mode `"synth-fallback"`
-/// 5. prctl returned EPERM → fatal `LauncherError::NeedsCapSysAdmin`
-/// 6. no kernel support and no `--no-unshare` → fatal `LauncherError::StockKernelNoFallback`
+/// 5. prctl returned ENOSYS/EINVAL → synthesize + warn, mode `"synth-fallback"`
+/// 6. prctl returned EPERM → fatal `LauncherError::NeedsCapSysAdmin`
+/// 7. no kernel support and no `--no-unshare` → fatal `LauncherError::StockKernelNoFallback`
 fn resolve_session(cli: &Cli) -> Result<(String, &'static str), LauncherError> {
     // 1. Mock
     if let Some(m) = mock::resolve()? {
@@ -155,8 +159,22 @@ fn resolve_session(cli: &Cli) -> Result<(String, &'static str), LauncherError> {
         return Ok((id, "no-unshare"));
     }
 
-    // 3 + 4 + 5. Try prctl(PR_SET_AGENT_NS) if the kernel surface is present.
+    // 3 + 4 + 5 + 6. Try prctl(PR_SET_AGENT_NS) if the kernel surface is
+    // present AND assay reports Live (gate on assay to avoid wasted syscalls
+    // on broken kernels per agentns-session-wire AC5).
     if unshare::kernel_has_agent_ns() {
+        // Assay gate: skip prctl if the kernel surface is broken.
+        if !assay::is_live() {
+            let id = unshare::synthesize_session_id()?;
+            let mut err = io::stderr().lock();
+            let _ = writeln!(
+                err,
+                "[agentns-claude] WARN: assay agentns not Live; \
+                 agentns unavailable, synthesizing session id"
+            );
+            return Ok((id, "synth-fallback"));
+        }
+
         match unshare::create_agent_ns() {
             Ok(()) => {
                 // Intent tag is best-effort; failures are non-fatal.
