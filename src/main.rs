@@ -1,14 +1,16 @@
 //! agentns-claude binary entry point.
 //!
-//! Resolution order for the wrapped child's session_id:
+//! Resolution order for the wrapped child's session_id (iter-3):
 //!
 //! 1. Mock file at `/tmp/agentns-mock` (or `$AGENTNS_MOCK_FILE` for tests).
 //! 2. `$AGENTNS_SESSION_ID_OVERRIDE` env var.
-//! 3. Real `unshare(CLONE_NEWAGENT)` under linux-wintermute (iter-3+).
-//! 4. `--no-unshare` fallback: synthesize from `(uid, btime, monotonic_ns)`.
+//! 3. `--no-unshare`: synthesize from `(uid, btime, monotonic_ns)`.
+//! 4. `prctl(PR_SET_AGENT_NS)` + `read_agent_session` (wintermute kernel).
+//! 5. prctl returned ENOSYS/EINVAL (stock kernel) → synthesize + warn, mode `synth-fallback`.
+//! 6. prctl returned EPERM → fatal.
 //!
-//! Without any of the above on a stock kernel, the launcher refuses to run
-//! and prints a clear remediation message (AC9).
+//! `AGENTNS_MODE` is exported to the child alongside `AGENTNS_SESSION_ID`
+//! and `AGENTNS_INTENT`.
 
 use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
@@ -25,7 +27,8 @@ use agentns_claude::{budget, mock, unshare};
     version,
     about = "Wrap a command in a wintermute agent namespace.",
     long_about = "Wrap a command in a wintermute agent namespace so /proc/$PID/agent_session reads stably from birth. \n\
-On stock kernels without CLONE_NEWAGENT, use --no-unshare to synthesize a session_id from (uid, boot_time, monotonic_now). \n\
+On wintermute kernels uses prctl(PR_SET_AGENT_NS) for a real namespace; falls back to a synthesized id on stock kernels. \n\
+Use --no-unshare to skip namespace creation and synthesize a session_id from (uid, boot_time, monotonic_now). \n\
 Mock-mode: set AGENTNS_SESSION_ID_OVERRIDE or write a session_id into /tmp/agentns-mock; file wins over env."
 )]
 struct Cli {
@@ -40,11 +43,11 @@ struct Cli {
     budget: Option<String>,
 
     /// Skip the unshare; synthesize a session_id from (uid, btime, monotonic_ns).
-    /// Use on stock kernels without CLONE_NEWAGENT support.
+    /// Use on stock kernels without PR_SET_AGENT_NS support.
     #[arg(long, default_value_t = false)]
     no_unshare: bool,
 
-    /// Log session_id, intent_tag, and budget settings to stderr before exec.
+    /// Log session_id, intent_tag, mode, and budget settings to stderr before exec.
     #[arg(long, default_value_t = false)]
     verbose: bool,
 
@@ -69,6 +72,7 @@ enum LauncherError {
     EmptyIntent,
     BadBudget(budget::ParseError),
     StockKernelNoFallback,
+    NeedsCapSysAdmin,
     Io(io::Error),
 }
 
@@ -79,8 +83,13 @@ impl std::fmt::Display for LauncherError {
             Self::BadBudget(e) => write!(f, "--budget: {e}"),
             Self::StockKernelNoFallback => write!(
                 f,
-                "kernel does not support agent namespaces (no CLONE_NEWAGENT). \
-                 Re-run with --no-unshare to skip namespace creation on stock kernels."
+                "kernel does not support agent namespaces and --no-unshare was not given. \
+                 Re-run with --no-unshare to synthesize a session_id on stock kernels."
+            ),
+            Self::NeedsCapSysAdmin => write!(
+                f,
+                "prctl(PR_SET_AGENT_NS) requires CAP_SYS_ADMIN in the user namespace. \
+                 Re-run as root or with a privileged user namespace, or use --no-unshare."
             ),
             Self::Io(e) => write!(f, "io: {e}"),
         }
@@ -115,40 +124,86 @@ fn run(cli: &Cli) -> Result<ExitCode, LauncherError> {
         }
     }
 
-    Ok(exec_child(cli, &session_id))
+    Ok(exec_child(cli, &session_id, mode))
 }
 
+/// Resolve (session_id, mode) according to the iter-3 precedence ladder.
+///
+/// Precedence:
+/// 1. mock (mock file or `AGENTNS_SESSION_ID_OVERRIDE`)
+/// 2. `--no-unshare` → synthesize, mode `"no-unshare"`
+/// 3. kernel has prctl → `create_agent_ns()` + `set_intent()` + `read_agent_session()`
+///    → mode `"prctl"`
+/// 4. prctl returned ENOSYS/EINVAL → synthesize + warn, mode `"synth-fallback"`
+/// 5. prctl returned EPERM → fatal `LauncherError::NeedsCapSysAdmin`
+/// 6. no kernel support and no `--no-unshare` → fatal `LauncherError::StockKernelNoFallback`
 fn resolve_session(cli: &Cli) -> Result<(String, &'static str), LauncherError> {
+    // 1. Mock
     if let Some(m) = mock::resolve()? {
         mock::announce(&m)?;
         return Ok((m.session_id, m.source));
     }
-    if unshare::kernel_has_agent_ns() {
-        // iter-3 wires the real CLONE_NEWAGENT + prctl plumbing here. For
-        // iter-2 we still exec the child so AC4 (exec semantics) is testable
-        // on a wintermute boot; the session_id is synthesized and a warning
-        // surfaces so nothing silently assumes a real namespace.
-        let id = unshare::synthesize_session_id()?;
-        let mut err = io::stderr().lock();
-        let _ = writeln!(
-            err,
-            "[agentns-claude] PENDING: agent_session detected but iter-2 has not wired CLONE_NEWAGENT; session_id synthesized"
-        );
-        return Ok((id, "pending-unshare"));
-    }
+
+    // 2. --no-unshare explicit override
     if cli.no_unshare {
         let id = unshare::synthesize_session_id()?;
         let mut err = io::stderr().lock();
         let _ = writeln!(
             err,
-            "[agentns-claude] no-unshare fallback: stock kernel, session_id synthesized"
+            "[agentns-claude] no-unshare: stock kernel, session_id synthesized"
         );
         return Ok((id, "no-unshare"));
     }
+
+    // 3 + 4 + 5. Try prctl(PR_SET_AGENT_NS) if the kernel surface is present.
+    if unshare::kernel_has_agent_ns() {
+        match unshare::create_agent_ns() {
+            Ok(()) => {
+                // Intent tag is best-effort; failures are non-fatal.
+                unshare::set_intent(&cli.intent);
+                let id = unshare::read_agent_session(
+                    std::path::Path::new("/proc/self/agent_session"),
+                )
+                .map_err(LauncherError::Io)?;
+                return Ok((id, "prctl"));
+            }
+            Err(unshare::AgentNsError::KernelLacksPrctl) => {
+                // ENOSYS/EINVAL: kernel probe said "yes" but prctl rejected it.
+                // Synthesize and warn so the child still gets a useful id.
+                let id = unshare::synthesize_session_id()?;
+                let mut err = io::stderr().lock();
+                let _ = writeln!(
+                    err,
+                    "[agentns-claude] WARNING: agent_session present but prctl(PR_SET_AGENT_NS) \
+                     returned EINVAL/ENOSYS; falling back to synthesized id"
+                );
+                return Ok((id, "synth-fallback"));
+            }
+            Err(unshare::AgentNsError::NeedsCapSysAdmin) => {
+                return Err(LauncherError::NeedsCapSysAdmin);
+            }
+            Err(unshare::AgentNsError::CreateSucceededButZero) => {
+                // Treat as a prctl failure (unexpected but possible race).
+                let id = unshare::synthesize_session_id()?;
+                let mut err = io::stderr().lock();
+                let _ = writeln!(
+                    err,
+                    "[agentns-claude] WARNING: prctl(PR_SET_AGENT_NS) succeeded but session is \
+                     all-zeros; falling back to synthesized id"
+                );
+                return Ok((id, "synth-fallback"));
+            }
+            Err(unshare::AgentNsError::Io(e)) => {
+                return Err(LauncherError::Io(e));
+            }
+        }
+    }
+
+    // 6. No kernel support and --no-unshare was not given.
     Err(LauncherError::StockKernelNoFallback)
 }
 
-fn exec_child(cli: &Cli, session_id: &str) -> ExitCode {
+fn exec_child(cli: &Cli, session_id: &str, mode: &str) -> ExitCode {
     // `cmd` is `required = true` + `last = true`, so it has at least one
     // element by clap's argv validation; defensively guard anyway because
     // the lint config forbids unwrap.
@@ -160,6 +215,7 @@ fn exec_child(cli: &Cli, session_id: &str) -> ExitCode {
     command.args(args);
     command.env("AGENTNS_SESSION_ID", session_id);
     command.env("AGENTNS_INTENT", &cli.intent);
+    command.env("AGENTNS_MODE", mode);
 
     // exec replaces the current process on success; only returns on error.
     let err = command.exec();
