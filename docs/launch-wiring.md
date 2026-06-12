@@ -40,15 +40,15 @@ claude() {
 
 ```bash
 if [[ -x "$HOME/.local/bin/agentns-claude" ]]; then
-  "$HOME/.local/bin/agentns-claude" --intent /build --no-unshare -- \
+  "$HOME/.local/bin/agentns-claude" --intent /build -- \
     /home/jsy/.local/bin/claude -p "/build"
 else
   /home/jsy/.local/bin/claude -p "/build"
 fi
 ```
 
-**Status:** already wired, uses `--no-unshare` (fallback for stock kernel).
-**Pending:** remove `--no-unshare` after prctl-wire lands (same flip as zshrc).
+**Status:** wired, `--no-unshare` removed (agentns-launch-flip AC4). Graceful
+synthesize+warn fallback is provided by prctl-wire v0.3.0 on stock kernels.
 
 ### 3. Headless `/dream` — `~/.local/bin/claude-dream-headless.sh`
 
@@ -56,15 +56,15 @@ fi
 
 ```bash
 if [[ -x "$HOME/.local/bin/agentns-claude" ]]; then
-  "$HOME/.local/bin/agentns-claude" --intent /dream --no-unshare -- \
+  "$HOME/.local/bin/agentns-claude" --intent /dream -- \
     /home/jsy/.local/bin/claude -p "/dream"
 else
   /home/jsy/.local/bin/claude -p "/dream"
 fi
 ```
 
-**Status:** already wired, uses `--no-unshare` (fallback for stock kernel).
-**Pending:** remove `--no-unshare` after prctl-wire lands.
+**Status:** wired, `--no-unshare` removed (agentns-launch-flip AC4). Graceful
+synthesize+warn fallback is provided by prctl-wire v0.3.0 on stock kernels.
 
 ### 4. Systemd service units (`claude-build.service`, `claude-dream.service`)
 
