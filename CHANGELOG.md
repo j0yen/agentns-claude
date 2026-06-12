@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.0 — 2026-06-12
+
+install script + launch wiring: scripts/install.sh (idempotent build+install+setcap), docs/launch-wiring.md (audit of all 4 install sites). Binary installed to ~/.local/bin/agentns-claude with cap_sys_admin=ep. zshrc --no-unshare removed.
+
 All notable changes to `agentns-claude` will be documented here. The format
 is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
