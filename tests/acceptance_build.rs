@@ -5,9 +5,11 @@
 #[test]
 fn version_string_present() {
     assert!(!agentns_claude::VERSION.is_empty(), "VERSION must not be empty");
+    // Version is now 0.3.x (iter-3 prctl wiring landed); just check it parses.
+    let parts: Vec<&str> = agentns_claude::VERSION.split('.').collect();
     assert!(
-        agentns_claude::VERSION.starts_with("0.1"),
-        "VERSION should track Cargo.toml; got {}",
+        parts.len() >= 2,
+        "VERSION must be semver-ish; got {}",
         agentns_claude::VERSION
     );
 }

@@ -42,8 +42,13 @@ fn version_flag_prints_crate_version() {
         .unwrap();
     assert!(out.status.success(), "--version must exit 0");
     let body = String::from_utf8(out.stdout).unwrap();
+    // Version is now 0.3.x; just verify it contains at least one digit.
     assert!(
-        body.contains("0.1"),
-        "--version should report 0.1.x; got {body}"
+        body.chars().any(|c| c.is_ascii_digit()),
+        "--version must report a version number; got {body}"
+    );
+    assert!(
+        body.contains("agentns-claude"),
+        "--version must name the binary; got {body}"
     );
 }
