@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.0 — 2026-06-12
+
+### iter-3: prctl(PR_SET_AGENT_NS) wiring
+
+- Add `create_agent_ns()` using `libc::prctl(PR_SET_AGENT_NS)` with typed `AgentNsError` (KernelLacksPrctl/NeedsCapSysAdmin/CreateSucceededButZero/Io)
+- Add `read_agent_session()` validating 32 lowercase hex non-zero chars from procfs
+- Add `set_intent()` non-fatal prctl(PR_SET_AGENT_INTENT_TAG) call
+- Rewire `resolve_session()`: mock → --no-unshare → prctl (mode "prctl") → EINVAL fallback (mode "synth-fallback") → EPERM fatal
+- Export `AGENTNS_MODE` to child env alongside SESSION_ID and INTENT
+- Add `libc` dependency
+- New tests: AC1 (create error mapping), AC2 (read_agent_session validation), AC3 (precedence), AC6 (AGENTNS_MODE in child env)
+- Remove pending-unshare mode string
+
 ## v0.2.0 — 2026-06-12
 
 install script + launch wiring: scripts/install.sh (idempotent build+install+setcap), docs/launch-wiring.md (audit of all 4 install sites). Binary installed to ~/.local/bin/agentns-claude with cap_sys_admin=ep. zshrc --no-unshare removed.
