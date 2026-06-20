@@ -1,90 +1,62 @@
 # agentns-claude
 
-Wraps a command in a wintermute agent namespace so `/proc/$PID/agent_session`
-reads stably from session birth. Built for Claude Code sessions; works for any
-command.
+Launches a command inside a wintermute agent namespace so that `/proc/$PID/agent_session` reads a stable id from the first instruction the process runs. Built for Claude Code sessions; the launcher itself is generic.
 
-## Status
-
-**v0.1 scaffold (Stage-2 of autobuilder).** Argv surface and module skeleton
-landed; the unshare/prctl plumbing and mock-mode resolver land in iter-2.
-ACs 5-8 are boot-gated and require booting into `linux-wintermute`.
+A downstream tool that attributes work to an agent session — provenance stamping, budget accounting, reaping — needs the session id to exist *before* the wrapped process does anything. If the id appears partway through startup, the early work is unattributable. `agentns-claude` creates the namespace, sets the intent tag, and only then `exec`s the child, so the id is born with the process rather than after it.
 
 ## Install
 
-```
+```sh
 cargo install --path .
 # or, from a checkout:
 cargo build --release && install -Dm755 target/release/agentns-claude ~/.local/bin/agentns-claude
 ```
 
-The binary depends only on glibc and a libc-style `unshare`/`prctl` surface;
-on stock kernels without `CLONE_NEWAGENT`, pass `--no-unshare` to fall back
-to userspace session-id synthesis.
+On a wintermute kernel, creating a real namespace needs `CAP_SYS_ADMIN`; `scripts/install.sh` builds, installs, and applies the capability with `setcap`. On stock kernels there is no `PR_SET_AGENT_NS`, so the launcher synthesizes a session id instead (see below) — no capability required.
 
 ## Usage
 
-```
+```sh
 agentns-claude --intent <tag> [--budget <spec>] [--no-unshare] [--verbose] -- <cmd> [args...]
 ```
 
-- `--intent <tag>` (required) — free-form string written to
-  `prctl(PR_SET_AGENT_INTENT_TAG)`. Conventions: `/build`, `/dream`,
-  `/self-review`, `interactive`, `headless`, `headless:<service-name>`.
-- `--budget <spec>` — comma-separated `key=value` pairs:
-  `wall=3600s,syscalls=1e7,write_bytes=10G,fork=1000`. Maps to
-  `prctl(PR_SET_AGENT_BUDGET_LIMITS)`. SIGTERM on soft limit, SIGKILL on hard.
-- `--no-unshare` — skip the unshare; emit a stderr warning and synthesize a
-  session_id from `(uid, boot_time_ns, monotonic_now_ns)`. For stock kernels.
-- `--verbose` — log session_id, intent_tag, and budget settings to stderr
-  before exec.
-- `-- <cmd> [args...]` — the wrapped command. Typically `claude`, but the
-  launcher is generic.
+- `--intent <tag>` (required) — written to `prctl(PR_SET_AGENT_INTENT_TAG)`. Conventions: `/build`, `/dream`, `/self-review`, `interactive`, `headless`, `headless:<service>`.
+- `--budget <spec>` — comma-separated `key=value` pairs: `wall=3600s,syscalls=1e7,write_bytes=10G,fork=1000`. Parsed and validated now; applying it through `prctl(PR_SET_AGENT_BUDGET_LIMITS)` is pending the kernel-side prctl. A bad spec fails fast before exec; a typo'd key is rejected rather than silently dropped.
+- `--no-unshare` — skip namespace creation and synthesize a session id from `(uid, boot_time_ns, monotonic_now_ns)`. For stock kernels.
+- `--verbose` — log the resolved mode, session id, intent, and budget to stderr before exec.
+- `-- <cmd> [args...]` — the wrapped command, typically `claude`.
 
-### Examples
-
-```
+```sh
 agentns-claude --intent /build -- claude
-agentns-claude --intent headless:self-review --budget wall=600s -- /home/jsy/.local/bin/self-review-headless.sh
+agentns-claude --intent headless:self-review --budget wall=600s -- ~/.local/bin/self-review-headless.sh
 agentns-claude --intent test --no-unshare -- bash
 ```
 
-## Mock mode (pre-boot iteration)
+## How a session id is resolved
 
-When the wintermute kernel isn't booted, downstream tools that read
-`/proc/$PID/agent_session` still need a stable id to iterate against.
-`agentns-claude` honors two override mechanisms:
+The launcher walks a fixed precedence ladder and exports the result to the child as `AGENTNS_SESSION_ID`, `AGENTNS_INTENT`, and `AGENTNS_MODE` so a tool reading the environment always knows *how* the id was obtained:
 
-- Env: `AGENTNS_SESSION_ID_OVERRIDE=<id>` — the launcher exports
-  `AGENTNS_SESSION_ID=<id>` into the child env and skips the unshare.
-- File: `/tmp/agentns-mock` containing a session-id string — the file wins
-  over the env if both are set (file is more deliberate than ambient env).
+1. **Mock** — `/tmp/agentns-mock` (file wins) or `AGENTNS_SESSION_ID_OVERRIDE` (env). Mode `mock`.
+2. **`--no-unshare`** — synthesize from `(uid, btime, monotonic_ns)`. Mode `no-unshare`.
+3. **Assay gate** — run `assay agentns`; if it reports anything other than `Live`, skip the prctl attempt and synthesize. Mode `synth-fallback`. This is what catches the booted-but-broken kernel rather than failing in the syscall.
+4. **prctl** — `create_agent_ns()` + `set_intent()` + read back a validated 32-hex non-zero id from procfs. Mode `prctl`.
+5. **prctl `ENOSYS`/`EINVAL`** (stock kernel) — synthesize and warn. Mode `synth-fallback`.
+6. **prctl `EPERM`** — fatal; the message tells you to re-run with `CAP_SYS_ADMIN` or `--no-unshare`.
 
-Both paths emit `[agentns-claude] MOCK MODE: session_id=<id>` to stderr so
-mock state is never silently mistaken for a real namespace.
+The mode string is the honesty mechanism: a synthesized id and a real namespaced id are never indistinguishable downstream.
 
-## Acceptance criteria
+## Mock mode (iterating before the kernel boots)
 
-See [`agent/intent-card.json`](agent/intent-card.json) for the structured
-contract; the short version:
+Tools that read `/proc/$PID/agent_session` need a stable id to develop against before `linux-wintermute` is running. Set `AGENTNS_SESSION_ID_OVERRIDE=<id>`, or write a session id into `/tmp/agentns-mock` (the file wins over the env — a file is more deliberate than an ambient variable). Either path prints `[agentns-claude] MOCK MODE: session_id=<id>` to stderr, so mock state is never mistaken for a real namespace.
 
-| AC   | Level | Test                                       | Notes                |
-|------|-------|--------------------------------------------|----------------------|
-| AC1  | MUST  | `tests/acceptance_build.rs`                | crate builds + ver   |
-| AC2  | MUST  | `tests/acceptance_help.rs`                 | --help is honest     |
-| AC3  | MUST  | `tests/acceptance_mock.rs`                 | mock-mode contract   |
-| AC4  | MUST  | `tests/acceptance_exec.rs`                 | exec semantics       |
-| AC5  | MUST  | `tests/acceptance_unshare_boot.rs` [boot]  | unshare lands a id   |
-| AC6  | MUST  | `tests/acceptance_inheritance_boot.rs` [boot] | grandchild same id |
-| AC7  | MUST  | `tests/acceptance_intent_tag_boot.rs` [boot] | intent_tag set     |
-| AC8  | MUST  | `tests/acceptance_budget_boot.rs` [boot]   | budget enforced     |
-| AC9  | MUST  | `tests/acceptance_no_unshare.rs`           | stock-kernel path   |
-| AC10 | MUST  | `tests/acceptance_docs.rs`                 | README + CHANGELOG  |
+## Status
 
-`[boot]` tests are `#[ignore]`'d unless `WINTERMUTE_BOOT=1` is set in the
-environment, so `cargo test` is green on stock kernels.
+The launcher is complete through iter-4 (v0.4.0). The argv surface, mock resolver, `--no-unshare` synthesis, the real `prctl(PR_SET_AGENT_NS)` path, and the `assay agentns` liveness gate are all wired and tested. Two things remain kernel-gated: `--budget` is parsed and validated but not yet applied through `prctl(PR_SET_AGENT_BUDGET_LIMITS)`, and the four `[boot]` acceptance tests (`AC5`–`AC8`) are `#[ignore]`'d unless `WINTERMUTE_BOOT=1`, so `cargo test` stays green on a stock kernel.
+
+## Where it fits
+
+This is the userspace launcher for [`agentns`](https://github.com/j0yen/agentns), the kernel patch series that adds the agent namespace. `agentns` provides the namespace and the prctl ops; `agentns-claude` is the front door that wraps a real command in one.
 
 ## License
 
-Dual-licensed under MIT or Apache-2.0 at the user's option. See
-[`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE).
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
